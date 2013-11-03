@@ -81,16 +81,21 @@ class MediaCodecBridge {
      * This class represents supported android codec information.
      */
     private static class CodecInfo {
-        private final String mCodecType;
+        private final String mCodecType;  // e.g. "video/x-vnd.on2.vp8".
+        private final String mCodecName;  // e.g. "OMX.google.vp8.decoder".
         private final boolean mIsSecureDecoderSupported;
 
-        private CodecInfo(String codecType, boolean isSecureDecoderSupported) {
+        private CodecInfo(String codecType, String codecName, boolean isSecureDecoderSupported) {
             mCodecType = codecType;
+            mCodecName = codecName;
             mIsSecureDecoderSupported = isSecureDecoderSupported;
         }
 
         @CalledByNative("CodecInfo")
         private String codecType() { return mCodecType; }
+
+        @CalledByNative("CodecInfo")
+        private String codecName() { return mCodecName; }
 
         @CalledByNative("CodecInfo")
         private boolean isSecureDecoderSupported() { return mIsSecureDecoderSupported; }
@@ -159,8 +164,8 @@ class MediaCodecBridge {
             }
             for (int j = 0; j < supportedTypes.length; ++j) {
                 if (!CodecInfoMap.containsKey(supportedTypes[j]) || secureDecoderSupported) {
-                    CodecInfoMap.put(supportedTypes[j],
-                                     new CodecInfo(supportedTypes[j], secureDecoderSupported));
+                    CodecInfoMap.put(supportedTypes[j], new CodecInfo(
+                        supportedTypes[j], codecString, secureDecoderSupported));
                 }
             }
         }
@@ -225,9 +230,15 @@ class MediaCodecBridge {
     }
 
     @CalledByNative
-    private void start() {
-        mMediaCodec.start();
-        mInputBuffers = mMediaCodec.getInputBuffers();
+    private boolean start() {
+        try {
+            mMediaCodec.start();
+            mInputBuffers = mMediaCodec.getInputBuffers();
+        } catch (IllegalStateException e) {
+            Log.e(TAG, "Cannot start the media codec " + e.toString());
+            return false;
+        }
+        return true;
     }
 
     @CalledByNative
@@ -338,8 +349,14 @@ class MediaCodecBridge {
     }
 
     @CalledByNative
-    private void getOutputBuffers() {
-        mOutputBuffers = mMediaCodec.getOutputBuffers();
+    private boolean getOutputBuffers() {
+        try {
+            mOutputBuffers = mMediaCodec.getOutputBuffers();
+        } catch (IllegalStateException e) {
+            Log.e(TAG, "Cannot get output buffers " + e.toString());
+            return false;
+        }
+        return true;
     }
 
     @CalledByNative
@@ -384,7 +401,7 @@ class MediaCodecBridge {
             mMediaCodec.configure(format, surface, crypto, flags);
             return true;
         } catch (IllegalStateException e) {
-          Log.e(TAG, "Cannot configure the video codec " + e.toString());
+            Log.e(TAG, "Cannot configure the video codec " + e.toString());
         }
         return false;
     }
@@ -400,7 +417,7 @@ class MediaCodecBridge {
     }
 
     @CalledByNative
-    private static void setCodecSpecificData(MediaFormat format, int index, ByteBuffer bytes) {
+    private static void setCodecSpecificData(MediaFormat format, int index, byte[] bytes) {
         String name = null;
         if (index == 0) {
             name = "csd-0";
@@ -408,7 +425,7 @@ class MediaCodecBridge {
             name = "csd-1";
         }
         if (name != null) {
-            format.setByteBuffer(name, bytes);
+            format.setByteBuffer(name, ByteBuffer.wrap(bytes));
         }
     }
 

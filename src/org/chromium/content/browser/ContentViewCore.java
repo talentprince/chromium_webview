@@ -25,7 +25,6 @@ import android.os.Handler;
 import android.os.ResultReceiver;
 import android.provider.Browser;
 import android.provider.Settings;
-import android.provider.Settings.Secure;
 import android.text.Editable;
 import android.text.TextUtils;
 import android.util.Log;
@@ -63,8 +62,8 @@ import org.chromium.content.browser.accessibility.BrowserAccessibilityManager;
 import org.chromium.content.browser.input.AdapterInputConnection;
 import org.chromium.content.browser.input.HandleView;
 import org.chromium.content.browser.input.ImeAdapter;
-import org.chromium.content.browser.input.InputMethodManagerWrapper;
 import org.chromium.content.browser.input.ImeAdapter.AdapterInputConnectionFactory;
+import org.chromium.content.browser.input.InputMethodManagerWrapper;
 import org.chromium.content.browser.input.InsertionHandleController;
 import org.chromium.content.browser.input.SelectPopupDialog;
 import org.chromium.content.browser.input.SelectionHandleController;
@@ -76,7 +75,6 @@ import org.chromium.ui.gfx.DeviceDisplayInfo;
 
 import java.lang.annotation.Annotation;
 import java.lang.reflect.Field;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -87,9 +85,9 @@ import java.util.Map;
  * being tied to the view system.
  */
 @JNINamespace("content")
-    public class ContentViewCore implements MotionEventDelegate,
-                                            NavigationClient,
-                                            AccessibilityStateChangeListener {
+public class ContentViewCore
+        implements MotionEventDelegate, NavigationClient, AccessibilityStateChangeListener {
+
     /**
      * Indicates that input events are batched together and delivered just before vsync.
      */
@@ -174,6 +172,11 @@ import java.util.Map;
         void super_onConfigurationChanged(Configuration newConfig);
 
         /**
+         * @see View#onScrollChanged(int, int, int, int)
+         */
+        void onScrollChanged(int lPix, int tPix, int oldlPix, int oldtPix);
+
+        /**
          * @see View#awakenScrollBars()
          */
         boolean awakenScrollBars();
@@ -185,8 +188,8 @@ import java.util.Map;
     }
 
     /**
-     * An interface that allows the embedder to be notified when the pinch gesture starts and
-     * stops.
+     * An interface that allows the embedder to be notified of events and state changes related to
+     * gesture processing.
      */
     public interface GestureStateListener {
         /**
@@ -213,6 +216,14 @@ import java.util.Map;
          * Called when a fling event was not handled by the renderer.
          */
         void onUnhandledFlingStartEvent();
+
+        /**
+         * Called to indicate that a scroll update gesture had been consumed by the page.
+         * This callback is called whenever any layer is scrolled (like a frame or div). It is
+         * not called when a JS touch handler consumes the event (preventDefault), it is not called
+         * for JS-initiated scrolling.
+         */
+        void onScrollUpdateGestureConsumed();
     }
 
     /**
@@ -245,11 +256,9 @@ import java.util.Map;
         /**
          * Called each time any of the parameters are changed.
          *
-         * @param widthCss The content width in logical (CSS) pixels.
-         * @param heightCss The content height in logical (CSS) pixels.
          * @param pageScaleFactor The page scale.
          */
-        void onFrameInfoUpdated(float widthCss, float heightCss, float pageScaleFactor);
+        void onFrameInfoUpdated(float pageScaleFactor);
     }
 
     private VSyncManager.Provider mVSyncProvider;
@@ -294,7 +303,7 @@ import java.util.Map;
         };
 
         if (mVSyncSubscriberCount > 0) {
-            // setVSyncNotificationEnabled(true) is called before getVSyncListener.
+            // addVSyncSubscriber() is called before getVSyncListener.
             vsyncProvider.registerVSyncListener(mVSyncListener);
             mVSyncListenerRegistered = true;
         }
@@ -303,27 +312,31 @@ import java.util.Map;
     }
 
     @CalledByNative
-    void setVSyncNotificationEnabled(boolean enabled) {
-        if (!isVSyncNotificationEnabled() && enabled) {
+    void addVSyncSubscriber() {
+        if (!isVSyncNotificationEnabled()) {
             mDidSignalVSyncUsingInputEvent = false;
         }
-        if (mVSyncProvider != null) {
-            if (!mVSyncListenerRegistered && enabled) {
-                mVSyncProvider.registerVSyncListener(mVSyncListener);
-                mVSyncListenerRegistered = true;
-            } else if (mVSyncSubscriberCount == 1 && !enabled) {
-                assert mVSyncListenerRegistered;
-                mVSyncProvider.unregisterVSyncListener(mVSyncListener);
-                mVSyncListenerRegistered = false;
-            }
+        if (mVSyncProvider != null && !mVSyncListenerRegistered) {
+            mVSyncProvider.registerVSyncListener(mVSyncListener);
+            mVSyncListenerRegistered = true;
         }
-        mVSyncSubscriberCount += enabled ? 1 : -1;
+        mVSyncSubscriberCount++;
+    }
+
+    @CalledByNative
+    void removeVSyncSubscriber() {
+        if (mVSyncProvider != null && mVSyncSubscriberCount == 1) {
+            assert mVSyncListenerRegistered;
+            mVSyncProvider.unregisterVSyncListener(mVSyncListener);
+            mVSyncListenerRegistered = false;
+        }
+        mVSyncSubscriberCount--;
         assert mVSyncSubscriberCount >= 0;
     }
 
     @CalledByNative
     private void resetVSyncNotification() {
-        while (isVSyncNotificationEnabled()) setVSyncNotificationEnabled(false);
+        while (isVSyncNotificationEnabled()) removeVSyncSubscriber();
         mVSyncSubscriberCount = 0;
         mVSyncListenerRegistered = false;
         mNeedAnimate = false;
@@ -337,7 +350,7 @@ import java.util.Map;
     private void setNeedsAnimate() {
         if (!mNeedAnimate) {
             mNeedAnimate = true;
-            setVSyncNotificationEnabled(true);
+            addVSyncSubscriber();
         }
     }
 
@@ -360,7 +373,6 @@ import java.util.Map;
 
     private ContentViewGestureHandler mContentViewGestureHandler;
     private GestureStateListener mGestureStateListener;
-    private UpdateFrameInfoListener mUpdateFrameInfoListener;
     private ZoomManager mZoomManager;
     private ZoomControlsDelegate mZoomControlsDelegate;
 
@@ -378,6 +390,9 @@ import java.util.Map;
 
     private Runnable mDeferredHandleFadeInRunnable;
 
+    private PositionObserver mPositionObserver;
+    private PositionObserver.Listener mPositionListener;
+
     // Size of the viewport in physical pixels as set from onSizeChanged.
     private int mViewportWidthPix;
     private int mViewportHeightPix;
@@ -386,6 +401,8 @@ import java.util.Map;
     private int mOverdrawBottomHeightPix;
     private int mViewportSizeOffsetWidthPix;
     private int mViewportSizeOffsetHeightPix;
+    private int mLocationInWindowX;
+    private int mLocationInWindowY;
 
     // Cached copy of all positions and scales as reported by the renderer.
     private final RenderCoordinates mRenderCoordinates;
@@ -427,8 +444,6 @@ import java.util.Map;
     // because the OSK was just brought up.
     private boolean mUnfocusOnNextSizeChanged = false;
     private final Rect mFocusPreOSKViewportRect = new Rect();
-
-    private boolean mNeedUpdateOrientationChanged;
 
     // Used to keep track of whether we should try to undo the last zoom-to-textfield operation.
     private boolean mScrolledAndZoomedFocusedEditableNode = false;
@@ -620,6 +635,8 @@ import java.util.Map;
                                     // If OSK is newly shown, delay the form focus until
                                     // the onSizeChanged (in order to adjust relative to the
                                     // new size).
+                                    // TODO(jdduke): We should not assume that onSizeChanged will
+                                    // always be called, crbug.com/294908.
                                     getContainerView().getWindowVisibleDisplayFrame(
                                             mFocusPreOSKViewportRect);
                                 } else if (resultCode ==
@@ -716,6 +733,15 @@ import java.util.Map;
         mHardwareAccelerated = hasHardwareAcceleration(mContext);
 
         mContainerView = containerView;
+        mPositionObserver = new ViewPositionObserver(mContainerView);
+        mPositionListener = new PositionObserver.Listener() {
+            @Override
+            public void onPositionChanged(int x, int y) {
+                if (isSelectionHandleShowing() || isInsertionHandleShowing()) {
+                    temporarilyHideTextHandles();
+                }
+            }
+        };
 
         int windowNativePointer = windowAndroid != null ? windowAndroid.getNativePointer() : 0;
 
@@ -749,12 +775,22 @@ import java.util.Map;
         };
 
         mPid = nativeGetCurrentRenderProcessId(mNativeContentViewCore);
+        sendOrientationChangeEvent();
     }
 
     @CalledByNative
     void onNativeContentViewCoreDestroyed(int nativeContentViewCore) {
         assert nativeContentViewCore == mNativeContentViewCore;
         mNativeContentViewCore = 0;
+    }
+
+    /**
+     * Set the Container view Internals.
+     * @param internalDispatcher Handles dispatching all hidden or super methods to the
+     *                           containerView.
+     */
+    public void setContainerViewInternals(InternalAccessDelegate internalDispatcher) {
+        mContainerViewInternals = internalDispatcher;
     }
 
     /**
@@ -784,6 +820,7 @@ import java.util.Map;
         };
 
         mRenderCoordinates.reset();
+        onRenderCoordinatesUpdated();
 
         initPopupZoomer(mContext);
         mImeAdapter = createImeAdapter(mContext);
@@ -1176,6 +1213,20 @@ import java.util.Map;
     }
 
     /**
+     * Loads the current navigation if there is a pending lazy load (after tab restore).
+     */
+    public void loadIfNecessary() {
+        if (mNativeContentViewCore != 0) nativeLoadIfNecessary(mNativeContentViewCore);
+    }
+
+    /**
+     * Requests the current navigation to be loaded upon the next call to loadIfNecessary().
+     */
+    public void requestRestoreLoad() {
+        if (mNativeContentViewCore != 0) nativeRequestRestoreLoad(mNativeContentViewCore);
+    }
+
+    /**
      * Reload the current page.
      */
     public void reload() {
@@ -1264,6 +1315,14 @@ import java.util.Map;
         }
     }
 
+    @SuppressWarnings("unused")
+    @CalledByNative
+    private void onScrollUpdateGestureConsumed() {
+        if (mGestureStateListener != null) {
+            mGestureStateListener.onScrollUpdateGestureConsumed();
+        }
+    }
+
     @Override
     public boolean sendGesture(int type, long timeMs, int x, int y, Bundle b) {
         if (offerGestureToEmbedder(type)) return false;
@@ -1276,6 +1335,9 @@ import java.util.Map;
                 return true;
             case ContentViewGestureHandler.GESTURE_SHOW_PRESS_CANCEL:
                 nativeShowPressCancel(mNativeContentViewCore, timeMs, x, y);
+                return true;
+            case ContentViewGestureHandler.GESTURE_TAP_DOWN:
+                nativeTapDown(mNativeContentViewCore, timeMs, x, y);
                 return true;
             case ContentViewGestureHandler.GESTURE_DOUBLE_TAP:
                 nativeDoubleTap(mNativeContentViewCore, timeMs, x, y);
@@ -1382,11 +1444,9 @@ import java.util.Map;
      *                 result will be json encoded and passed as the parameter, and the call
      *                 will be made on the main thread.
      *                 If no result is required, pass null.
-     * @throws IllegalStateException If the ContentView has been destroyed.
      */
-    public void evaluateJavaScript(
-            String script, JavaScriptCallback callback) throws IllegalStateException {
-        checkIsAlive();
+    public void evaluateJavaScript(String script, JavaScriptCallback callback) {
+        if (mNativeContentViewCore == 0) return;
         nativeEvaluateJavaScript(mNativeContentViewCore, script, callback, false);
     }
 
@@ -1395,30 +1455,10 @@ import java.util.Map;
      * If there is no page existing, a new one will be created.
      *
      * @param script The Javascript to execute.
-     * @throws IllegalStateException If the ContentView has been destroyed.
      */
-    public void evaluateJavaScriptEvenIfNotYetNavigated(String script)
-            throws IllegalStateException {
-        checkIsAlive();
+    public void evaluateJavaScriptEvenIfNotYetNavigated(String script) {
+        if (mNativeContentViewCore == 0) return;
         nativeEvaluateJavaScript(mNativeContentViewCore, script, null, true);
-    }
-
-    /**
-     * This method should be called when the containing activity is paused.
-     */
-    public void onActivityPause() {
-        TraceEvent.begin();
-        hidePopupDialog();
-        nativeOnHide(mNativeContentViewCore);
-        TraceEvent.end();
-    }
-
-    /**
-     * This method should be called when the containing activity is resumed.
-     */
-    public void onActivityResume() {
-        nativeOnShow(mNativeContentViewCore);
-        setAccessibilityState(mAccessibilityManager.isEnabled());
     }
 
     /**
@@ -1454,9 +1494,16 @@ import java.util.Map;
                 x, y, computeHorizontalScrollOffset(), computeVerticalScrollOffset());
     }
 
-    @Override
-    public boolean hasFixedPageScale() {
-        return mRenderCoordinates.hasFixedPageScale();
+    private void onRenderCoordinatesUpdated() {
+        if (mContentViewGestureHandler == null) return;
+
+        // We disable double tap zoom for pages that have a width=device-width
+        // or narrower viewport (indicating that this is a mobile-optimized or
+        // responsive web design, so text will be legible without zooming).
+        // We also disable it for pages that disallow the user from zooming in
+        // or out (even if they don't have a device-width or narrower viewport).
+        mContentViewGestureHandler.updateShouldDisableDoubleTap(
+                mRenderCoordinates.hasMobileViewport() || mRenderCoordinates.hasFixedPageScale());
     }
 
     private void hidePopupDialog() {
@@ -1488,12 +1535,12 @@ import java.util.Map;
         mAttachedToWindow = true;
         if (mNativeContentViewCore != 0) {
             assert mPid == nativeGetCurrentRenderProcessId(mNativeContentViewCore);
-            ChildProcessLauncher.bindAsHighPriority(mPid);
+            ChildProcessLauncher.getBindingManager().bindAsHighPriority(mPid);
             // Normally the initial binding is removed in onRenderProcessSwap(), but it is possible
             // to construct WebContents and spawn the renderer before passing it to ContentViewCore.
             // In this case there will be no onRenderProcessSwap() call and the initial binding will
             // be removed here.
-            ChildProcessLauncher.removeInitialBinding(mPid);
+            ChildProcessLauncher.getBindingManager().removeInitialBinding(mPid);
         }
         setAccessibilityState(mAccessibilityManager.isEnabled());
     }
@@ -1506,7 +1553,7 @@ import java.util.Map;
         mAttachedToWindow = false;
         if (mNativeContentViewCore != 0) {
             assert mPid == nativeGetCurrentRenderProcessId(mNativeContentViewCore);
-            ChildProcessLauncher.unbindAsHighPriority(mPid);
+            ChildProcessLauncher.getBindingManager().unbindAsHighPriority(mPid);
         }
         setInjectedAccessibility(false);
         hidePopupDialog();
@@ -1566,7 +1613,18 @@ import java.util.Map;
             manager.restartInput(mContainerView);
         }
         mContainerViewInternals.super_onConfigurationChanged(newConfig);
-        mNeedUpdateOrientationChanged = true;
+        // Make sure the size is up to date in JavaScript's window.onorientationchanged.
+        mContainerView.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+            @Override
+            public void onLayoutChange(View v, int left, int top, int right, int bottom,
+                    int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                mContainerView.removeOnLayoutChangeListener(this);
+                sendOrientationChangeEvent();
+            }
+        });
+        // To request layout has side effect, but it seems OK as it only happen in
+        // onConfigurationChange and layout has to be changed in most case.
+        mContainerView.requestLayout();
         TraceEvent.end();
     }
 
@@ -1584,6 +1642,15 @@ import java.util.Map;
         }
 
         updateAfterSizeChanged();
+    }
+
+    /**
+     * Called when the ContentView's position in the activity window changed. This information is
+     * used for cropping screenshots.
+     */
+    public void onLocationInWindowChanged(int x, int y) {
+        mLocationInWindowX = x;
+        mLocationInWindowY = y;
     }
 
     /**
@@ -1624,17 +1691,15 @@ import java.util.Map;
             Rect rect = new Rect();
             getContainerView().getWindowVisibleDisplayFrame(rect);
             if (!rect.equals(mFocusPreOSKViewportRect)) {
-                scrollFocusedEditableNodeIntoView();
+                // Only assume the OSK triggered the onSizeChanged if width was preserved.
+                if (rect.width() == mFocusPreOSKViewportRect.width()) {
+                    scrollFocusedEditableNodeIntoView();
+                }
                 mFocusPreOSKViewportRect.setEmpty();
             }
         } else if (mUnfocusOnNextSizeChanged) {
             undoScrollFocusedEditableNodeIntoViewIfNeeded(true);
             mUnfocusOnNextSizeChanged = false;
-        }
-
-        if (mNeedUpdateOrientationChanged) {
-            sendOrientationChangeEvent();
-            mNeedUpdateOrientationChanged = false;
         }
     }
 
@@ -1680,6 +1745,15 @@ import java.util.Map;
             scrollTask.run();
         }
         mScrolledAndZoomedFocusedEditableNode = false;
+    }
+
+    /**
+     * @see View#onWindowFocusChanged(boolean)
+     */
+    public void onWindowFocusChanged(boolean hasWindowFocus) {
+        if (!hasWindowFocus) {
+            mContentViewGestureHandler.onWindowFocusLost();
+        }
     }
 
     public void onFocusChanged(boolean gainFocus) {
@@ -1885,11 +1959,24 @@ import java.util.Map;
         }
     }
 
+    /**
+     * Called by native side when the corresponding renderer crashes. Note that if a renderer is
+     * shared between tabs, this might be called multiple times while the tab is crashed. This is
+     * because the tabs sharing a renderer also share RenderProcessHost. When one of those tabs
+     * reloads and a new renderer is created for the shared RenderProcessHost, all tabs are notified
+     * in onRenderProcessSwap(), not only the one that reloads. If this renderer dies, all the other
+     * dead tabs are notified again.
+     * @param alreadyCrashed true iff this tab is already in crashed state but the shared renderer
+     *                       resurrected and died again since the last time this was called.
+     */
     @SuppressWarnings("unused")
     @CalledByNative
-    private void onTabCrash() {
+    private void onTabCrash(boolean alreadyCrashed) {
         assert mPid != 0;
-        getContentViewClient().onRendererCrash(ChildProcessLauncher.isOomProtected(mPid));
+        if (!alreadyCrashed) {
+            getContentViewClient().onRendererCrash(
+                    ChildProcessLauncher.getBindingManager().isOomProtected(mPid));
+        }
         mPid = 0;
     }
 
@@ -1933,8 +2020,8 @@ import java.util.Map;
         mZoomManager.updateMultiTouchSupport(supportsMultiTouchZoom);
     }
 
-    public void updateDoubleTapDragSupport(boolean supportsDoubleTapDrag) {
-        mContentViewGestureHandler.updateDoubleTapDragSupport(supportsDoubleTapDrag);
+    public void updateDoubleTapSupport(boolean supportsDoubleTap) {
+        mContentViewGestureHandler.updateDoubleTapSupport(supportsDoubleTap);
     }
 
     public void selectPopupMenuItems(int[] indices) {
@@ -1947,12 +2034,6 @@ import java.util.Map;
      * Get the screen orientation from the OS and push it to WebKit.
      *
      * TODO(husky): Add a hook for mock orientations.
-     *
-     * TODO(husky): Currently each new tab starts with an orientation of 0 until you actually
-     * rotate the device. This is wrong if you actually started in landscape mode. To fix this, we
-     * need to push the correct orientation, but only after WebKit's Frame object has been fully
-     * initialized. Need to find a good time to do that. onPageFinished() would probably work but
-     * it isn't implemented yet.
      */
     private void sendOrientationChangeEvent() {
         if (mNativeContentViewCore == 0) return;
@@ -1995,7 +2076,8 @@ import java.util.Map;
 
     private SelectionHandleController getSelectionHandleController() {
         if (mSelectionHandleController == null) {
-            mSelectionHandleController = new SelectionHandleController(getContainerView()) {
+            mSelectionHandleController = new SelectionHandleController(
+                    getContainerView(), mPositionObserver) {
                 @Override
                 public void selectBetweenCoordinates(int x1, int y1, int x2, int y2) {
                     if (mNativeContentViewCore != 0 && !(x1 == x2 && y1 == y2)) {
@@ -2021,7 +2103,8 @@ import java.util.Map;
 
     private InsertionHandleController getInsertionHandleController() {
         if (mInsertionHandleController == null) {
-            mInsertionHandleController = new InsertionHandleController(getContainerView()) {
+            mInsertionHandleController = new InsertionHandleController(
+                    getContainerView(), mPositionObserver) {
                 private static final int AVERAGE_LINE_HEIGHT = 14;
 
                 @Override
@@ -2087,6 +2170,7 @@ import java.util.Map;
         if (mInsertionHandleController != null) {
             mInsertionHandleController.hideAndDisallowAutomaticShowing();
         }
+        mPositionObserver.removeListener(mPositionListener);
     }
 
     private void showSelectActionBar() {
@@ -2261,10 +2345,10 @@ import java.util.Map;
     // Makes the insertion/selection handles invisible. They will fade back in shortly after the
     // last call to scheduleTextHandleFadeIn (or temporarilyHideTextHandles).
     private void temporarilyHideTextHandles() {
-        if (isSelectionHandleShowing()) {
+        if (isSelectionHandleShowing() && !mSelectionHandleController.isDragging()) {
             mSelectionHandleController.setHandleVisibility(HandleView.INVISIBLE);
         }
-        if (isInsertionHandleShowing()) {
+        if (isInsertionHandleShowing() && !mInsertionHandleController.isDragging()) {
             mInsertionHandleController.setHandleVisibility(HandleView.INVISIBLE);
         }
         scheduleTextHandleFadeIn();
@@ -2315,10 +2399,6 @@ import java.util.Map;
         if (mNativeContentViewCore != 0) nativeShowImeIfNeeded(mNativeContentViewCore);
     }
 
-    public void setUpdateFrameInfoListener(UpdateFrameInfoListener updateFrameInfoListener) {
-        mUpdateFrameInfoListener = updateFrameInfoListener;
-    }
-
     @SuppressWarnings("unused")
     @CalledByNative
     private void updateFrameInfo(
@@ -2359,12 +2439,12 @@ import java.util.Map;
 
         if (needHidePopupZoomer) mPopupZoomer.hide(true);
 
-        if (pageScaleChanged) {
-            // This function should be called back from native as soon
-            // as the scroll is applied to the backbuffer.  We should only
-            // update mNativeScrollX/Y here for consistency.
-            getContentViewClient().onScaleChanged(
-                    mRenderCoordinates.getPageScaleFactor(), pageScaleFactor);
+        if (scrollChanged) {
+            mContainerViewInternals.onScrollChanged(
+                    (int) mRenderCoordinates.fromLocalCssToPix(scrollOffsetX),
+                    (int) mRenderCoordinates.fromLocalCssToPix(scrollOffsetY),
+                    (int) mRenderCoordinates.getScrollXPix(),
+                    (int) mRenderCoordinates.getScrollYPix());
         }
 
         mRenderCoordinates.updateFrameInfo(
@@ -2373,11 +2453,7 @@ import java.util.Map;
                 viewportWidth, viewportHeight,
                 pageScaleFactor, minPageScaleFactor, maxPageScaleFactor,
                 contentOffsetYPix);
-
-        if ((contentSizeChanged || pageScaleChanged) && mUpdateFrameInfoListener != null) {
-            mUpdateFrameInfoListener.onFrameInfoUpdated(
-                    contentWidth, contentHeight, pageScaleFactor);
-        }
+        onRenderCoordinatesUpdated();
 
         if (needTemporarilyHideHandles) temporarilyHideTextHandles();
         if (needUpdateZoomControls) mZoomControlsDelegate.updateZoomControls();
@@ -2399,11 +2475,10 @@ import java.util.Map;
         getContentViewClient().onGeometryChanged(-1, null);
     }
 
-    @SuppressWarnings("unused")
     @CalledByNative
     private void updateImeAdapter(int nativeImeAdapterAndroid, int textInputType,
             String text, int selectionStart, int selectionEnd,
-            int compositionStart, int compositionEnd, boolean showImeIfNeeded) {
+            int compositionStart, int compositionEnd, boolean showImeIfNeeded, boolean requireAck) {
         TraceEvent.begin();
         mSelectionEditable = (textInputType != ImeAdapter.getTextInputTypeNone());
 
@@ -2413,17 +2488,10 @@ import java.util.Map;
                 selectionStart, selectionEnd, showImeIfNeeded);
 
         if (mInputConnection != null) {
-            mInputConnection.setEditableText(text, selectionStart, selectionEnd,
-                    compositionStart, compositionEnd);
+            mInputConnection.updateState(text, selectionStart, selectionEnd, compositionStart,
+                    compositionEnd, requireAck);
         }
         TraceEvent.end();
-    }
-
-    @SuppressWarnings("unused")
-    @CalledByNative
-    private void processImeBatchStateAck(boolean isBegin) {
-        if (mInputConnection == null) return;
-        mInputConnection.setIgnoreTextInputStateUpdates(isBegin);
     }
 
     @SuppressWarnings("unused")
@@ -2499,15 +2567,18 @@ import java.util.Map;
                 mEndHandlePoint.setLocalDip(x1, y1);
             }
 
-            if (getSelectionHandleController().isShowing()) {
+            boolean wereSelectionHandlesShowing = getSelectionHandleController().isShowing();
+
+            getSelectionHandleController().onSelectionChanged(anchorDir, focusDir);
+            updateHandleScreenPositions();
+            mHasSelection = true;
+
+            if (!wereSelectionHandlesShowing && getSelectionHandleController().isShowing()) {
                 // TODO(cjhopman): Remove this when there is a better signal that long press caused
                 // a selection. See http://crbug.com/150151.
                 mContainerView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
             }
 
-            getSelectionHandleController().onSelectionChanged(anchorDir, focusDir);
-            updateHandleScreenPositions();
-            mHasSelection = true;
         } else {
             mUnselectAllOnActionModeDismiss = false;
             hideSelectActionBar();
@@ -2538,6 +2609,9 @@ import java.util.Map;
             }
             mHasSelection = false;
         }
+        if (isSelectionHandleShowing() || isInsertionHandleShowing()) {
+            mPositionObserver.addListener(mPositionListener);
+        }
     }
 
     @SuppressWarnings("unused")
@@ -2561,38 +2635,31 @@ import java.util.Map;
     private void onRenderProcessSwap(int oldPid, int newPid) {
         assert mPid == oldPid || mPid == newPid;
         if (mAttachedToWindow && oldPid != newPid) {
-            ChildProcessLauncher.unbindAsHighPriority(oldPid);
-            ChildProcessLauncher.bindAsHighPriority(newPid);
+            ChildProcessLauncher.getBindingManager().unbindAsHighPriority(oldPid);
+            ChildProcessLauncher.getBindingManager().bindAsHighPriority(newPid);
         }
 
         // We want to remove the initial binding even if the ContentView is not attached, so that
         // renderers for ContentViews loading in background do not retain the high priority.
-        ChildProcessLauncher.removeInitialBinding(newPid);
+        ChildProcessLauncher.getBindingManager().removeInitialBinding(newPid);
         mPid = newPid;
+
+        attachImeAdapter();
     }
 
     @SuppressWarnings("unused")
     @CalledByNative
     private void onWebContentsConnected() {
-        if (mImeAdapter != null &&
-                !mImeAdapter.isNativeImeAdapterAttached() && mNativeContentViewCore != 0) {
-            mImeAdapter.attach(nativeGetNativeImeAdapter(mNativeContentViewCore));
-        }
-    }
-
-    @SuppressWarnings("unused")
-    @CalledByNative
-    private void onWebContentsSwapped() {
-        if (mImeAdapter != null && mNativeContentViewCore != 0) {
-            mImeAdapter.attach(nativeGetNativeImeAdapter(mNativeContentViewCore));
-        }
+        attachImeAdapter();
     }
 
     /**
-     * @return Whether a reload happens when this ContentView is activated.
+     * Attaches the native ImeAdapter object to the java ImeAdapter to allow communication via JNI.
      */
-    public boolean needsReload() {
-        return mNativeContentViewCore != 0 && nativeNeedsReload(mNativeContentViewCore);
+    public void attachImeAdapter() {
+        if (mImeAdapter != null && mNativeContentViewCore != 0) {
+            mImeAdapter.attach(nativeGetNativeImeAdapter(mNativeContentViewCore));
+        }
     }
 
     /**
@@ -2641,7 +2708,7 @@ import java.util.Map;
         if (!canZoomIn()) {
             return false;
         }
-        return zoomByDelta(1.25f);
+        return pinchByDelta(1.25f);
     }
 
     /**
@@ -2656,7 +2723,7 @@ import java.util.Map;
         if (!canZoomOut()) {
             return false;
         }
-        return zoomByDelta(0.8f);
+        return pinchByDelta(0.8f);
     }
 
     /**
@@ -2670,12 +2737,18 @@ import java.util.Map;
         // The page scale factor is initialized to mNativeMinimumScale when
         // the page finishes loading. Thus sets it back to mNativeMinimumScale.
         if (!canZoomOut()) return false;
-        return zoomByDelta(
+        return pinchByDelta(
                 mRenderCoordinates.getMinPageScaleFactor()
                         / mRenderCoordinates.getPageScaleFactor());
     }
 
-    private boolean zoomByDelta(float delta) {
+    /**
+     * Simulate a pinch zoom gesture.
+     *
+     * @param delta the factor by which the current page scale should be multiplied by.
+     * @return whether the gesture was sent.
+     */
+    public boolean pinchByDelta(float delta) {
         if (mNativeContentViewCore == 0) {
             return false;
         }
@@ -2927,6 +3000,7 @@ import java.util.Map;
 
             if (mAccessibilityScriptInjectionObserver == null) {
                 ContentObserver contentObserver = new ContentObserver(new Handler()) {
+                    @Override
                     public void onChange(boolean selfChange, Uri uri) {
                         setAccessibilityState(mAccessibilityManager.isEnabled());
                     }
@@ -2961,15 +3035,12 @@ import java.util.Map;
     public void setAccessibilityState(boolean state) {
         if (!state) {
             setInjectedAccessibility(false);
-            return;
+            mNativeAccessibilityAllowed = false;
+        } else {
+            boolean useScriptInjection = isDeviceAccessibilityScriptInjectionEnabled();
+            setInjectedAccessibility(useScriptInjection);
+            mNativeAccessibilityAllowed = !useScriptInjection;
         }
-
-        if (isDeviceAccessibilityScriptInjectionEnabled()) {
-            setInjectedAccessibility(true);
-            return;
-        }
-
-        mNativeAccessibilityAllowed = true;
     }
 
     /**
@@ -2991,7 +3062,7 @@ import java.util.Map;
      * Inform WebKit that Fullscreen mode has been exited by the user.
      */
     public void exitFullscreen() {
-        nativeExitFullscreen(mNativeContentViewCore);
+        if (mNativeContentViewCore != 0) nativeExitFullscreen(mNativeContentViewCore);
     }
 
     /**
@@ -3003,7 +3074,10 @@ import java.util.Map;
      */
     public void updateTopControlsState(boolean enableHiding, boolean enableShowing,
             boolean animate) {
-        nativeUpdateTopControlsState(mNativeContentViewCore, enableHiding, enableShowing, animate);
+        if (mNativeContentViewCore != 0) {
+            nativeUpdateTopControlsState(
+                    mNativeContentViewCore, enableHiding, enableShowing, animate);
+        }
     }
 
     /**
@@ -3022,15 +3096,20 @@ import java.util.Map;
      */
     public NavigationHistory getNavigationHistory() {
         NavigationHistory history = new NavigationHistory();
-        int currentIndex = nativeGetNavigationHistory(mNativeContentViewCore, history);
-        history.setCurrentEntryIndex(currentIndex);
+        if (mNativeContentViewCore != 0) {
+            int currentIndex = nativeGetNavigationHistory(mNativeContentViewCore, history);
+            history.setCurrentEntryIndex(currentIndex);
+        }
         return history;
     }
 
     @Override
     public NavigationHistory getDirectedNavigationHistory(boolean isForward, int itemLimit) {
         NavigationHistory history = new NavigationHistory();
-        nativeGetDirectedNavigationHistory(mNativeContentViewCore, history, isForward, itemLimit);
+        if (mNativeContentViewCore != 0) {
+            nativeGetDirectedNavigationHistory(
+                mNativeContentViewCore, history, isForward, itemLimit);
+        }
         return history;
     }
 
@@ -3039,7 +3118,10 @@ import java.util.Map;
      *         current entry.
      */
     public String getOriginalUrlForActiveNavigationEntry() {
-        return nativeGetOriginalUrlForActiveNavigationEntry(mNativeContentViewCore);
+        if (mNativeContentViewCore != 0) {
+            return nativeGetOriginalUrlForActiveNavigationEntry(mNativeContentViewCore);
+        }
+        return "";
     }
 
     /**
@@ -3047,6 +3129,16 @@ import java.util.Map;
      */
     public RenderCoordinates getRenderCoordinates() {
         return mRenderCoordinates;
+    }
+
+    @CalledByNative
+    private int getLocationInWindowX() {
+        return mLocationInWindowX;
+    }
+
+    @CalledByNative
+    private int getLocationInWindowY() {
+        return mLocationInWindowY;
     }
 
     @CalledByNative
@@ -3074,7 +3166,7 @@ import java.util.Map;
     private void animateIfNecessary(long frameTimeMicros) {
         if (mNeedAnimate) {
             mNeedAnimate = onAnimate(frameTimeMicros);
-            if (!mNeedAnimate) setVSyncNotificationEnabled(false);
+            if (!mNeedAnimate) removeVSyncSubscriber();
         }
     }
 
@@ -3176,6 +3268,9 @@ import java.util.Map;
     private native void nativeShowPressCancel(
             int nativeContentViewCoreImpl, long timeMs, float x, float y);
 
+    private native void nativeTapDown(
+            int nativeContentViewCoreImpl, long timeMs, float x, float y);
+
     private native void nativeDoubleTap(
             int nativeContentViewCoreImpl, long timeMs, float x, float y);
 
@@ -3205,6 +3300,8 @@ import java.util.Map;
     private native void nativeGoForward(int nativeContentViewCoreImpl);
     private native void nativeGoToOffset(int nativeContentViewCoreImpl, int offset);
     private native void nativeGoToNavigationIndex(int nativeContentViewCoreImpl, int index);
+    private native void nativeLoadIfNecessary(int nativeContentViewCoreImpl);
+    private native void nativeRequestRestoreLoad(int nativeContentViewCoreImpl);
 
     private native void nativeStopLoading(int nativeContentViewCoreImpl);
 
@@ -3218,7 +3315,6 @@ import java.util.Map;
 
     private native void nativeScrollFocusedEditableNodeIntoView(int nativeContentViewCoreImpl);
     private native void nativeUndoScrollFocusedEditableNodeIntoView(int nativeContentViewCoreImpl);
-    private native boolean nativeNeedsReload(int nativeContentViewCoreImpl);
 
     private native void nativeClearHistory(int nativeContentViewCoreImpl);
 
