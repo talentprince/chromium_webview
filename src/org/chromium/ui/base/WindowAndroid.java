@@ -2,22 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-package org.chromium.ui;
+package org.chromium.ui.base;
 
-import android.app.Activity;
-import android.content.ActivityNotFoundException;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
-import android.graphics.Bitmap;
-import android.graphics.Rect;
 import android.os.Bundle;
 import android.util.Log;
 import android.util.SparseArray;
-import android.view.View;
 import android.widget.Toast;
 
-import java.io.ByteArrayOutputStream;
 import java.util.HashMap;
 
 import org.chromium.base.CalledByNative;
@@ -28,33 +22,26 @@ import org.chromium.base.JNINamespace;
  */
 @JNINamespace("ui")
 public class WindowAndroid {
-
     private static final String TAG = "WindowAndroid";
 
     // Native pointer to the c++ WindowAndroid object.
-    private int mNativeWindowAndroid = 0;
+    private long mNativeWindowAndroid = 0;
 
-    // Constants used for intent request code bounding.
-    private static final int REQUEST_CODE_PREFIX = 1000;
-    private static final int REQUEST_CODE_RANGE_SIZE = 100;
     // A string used as a key to store intent errors in a bundle
     static final String WINDOW_CALLBACK_ERRORS = "window_callback_errors";
 
-    private int mNextRequestCode = 0;
-    protected Activity mActivity;
     protected Context mApplicationContext;
     protected SparseArray<IntentCallback> mOutstandingIntents;
     protected HashMap<Integer, String> mIntentErrors;
 
     /**
-     * @param activity
+     * @param context, the application context..
      */
-    public WindowAndroid(Activity activity) {
-        mActivity = activity;
-        mApplicationContext = mActivity.getApplicationContext();
+    public WindowAndroid(Context context) {
+        assert context == context.getApplicationContext();
+        mApplicationContext = context;
         mOutstandingIntents = new SparseArray<IntentCallback>();
         mIntentErrors = new HashMap<Integer, String>();
-
     }
 
     /**
@@ -66,18 +53,21 @@ public class WindowAndroid {
      * @return Whether the intent was shown.
      */
     public boolean showIntent(Intent intent, IntentCallback callback, int errorId) {
-        int requestCode = REQUEST_CODE_PREFIX + mNextRequestCode;
-        mNextRequestCode = (mNextRequestCode + 1) % REQUEST_CODE_RANGE_SIZE;
+        Log.d(TAG, "Can't show intent as context is not an Activity: " + intent);
+        return false;
+    }
 
-        try {
-            mActivity.startActivityForResult(intent, requestCode);
-        } catch (ActivityNotFoundException e) {
-            return false;
-        }
-
-        mOutstandingIntents.put(requestCode, callback);
-        mIntentErrors.put(requestCode, mActivity.getString(errorId));
-
+    /**
+     * Removes a callback from the list of pending intents, so that nothing happens if/when the
+     * result for that intent is received.
+     * @param callback The object that should have received the results
+     * @return True if the callback was removed, false if it was not found.
+    */
+    public boolean removeIntentCallback(IntentCallback callback) {
+        int requestCode = mOutstandingIntents.indexOfValue(callback);
+        if (requestCode < 0) return false;
+        mOutstandingIntents.remove(requestCode);
+        mIntentErrors.remove(requestCode);
         return true;
     }
 
@@ -87,7 +77,7 @@ public class WindowAndroid {
      */
     public void showError(String error) {
         if (error != null) {
-            Toast.makeText(mActivity, error, Toast.LENGTH_SHORT).show();
+            Toast.makeText(mApplicationContext, error, Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -96,7 +86,7 @@ public class WindowAndroid {
      * @param resId The error message string's resource id.
      */
     public void showError(int resId) {
-        showError(mActivity.getString(resId));
+        showError(mApplicationContext.getString(resId));
     }
 
     /**
@@ -111,17 +101,18 @@ public class WindowAndroid {
      * Broadcasts the given intent to all interested BroadcastReceivers.
      */
     public void sendBroadcast(Intent intent) {
-        mActivity.sendBroadcast(intent);
+        mApplicationContext.sendBroadcast(intent);
     }
 
     /**
      * TODO(nileshagrawal): Stop returning Activity Context crbug.com/233440.
-     * @return Activity context.
+     * @return Activity context, it could be null. Note, in most cases, you probably
+     * just need Application Context returned by getApplicationContext().
      * @see #getApplicationContext()
      */
     @Deprecated
     public Context getContext() {
-        return mActivity;
+        return null;
     }
 
     /**
@@ -164,20 +155,6 @@ public class WindowAndroid {
      * @return Boolean value of whether the intent was started by the native window.
      */
     public boolean onActivityResult(int requestCode, int resultCode, Intent data) {
-        IntentCallback callback = mOutstandingIntents.get(requestCode);
-        mOutstandingIntents.delete(requestCode);
-        String errorMessage = mIntentErrors.remove(requestCode);
-
-        if (callback != null) {
-            callback.onIntentCompleted(this, resultCode,
-                    mActivity.getContentResolver(), data);
-            return true;
-        } else {
-            if (errorMessage != null) {
-                showCallbackNonExistentError(errorMessage);
-                return true;
-            }
-        }
         return false;
     }
 
@@ -197,6 +174,16 @@ public class WindowAndroid {
     }
 
     /**
+     * Tests that an activity is available to handle the passed in intent.
+     * @param  Intent the intent to check.
+     * @return True if an activity is available to process this intent when started, meaning that
+     *         Context.startActivity will not throw ActivityNotFoundException.
+     */
+    public boolean canResolveActivity(Intent intent) {
+        return mApplicationContext.getPackageManager().resolveActivity(intent, 0) != null;
+    }
+
+    /**
      * Destroys the c++ WindowAndroid object if one has been created.
      */
     public void destroy() {
@@ -211,7 +198,7 @@ public class WindowAndroid {
      * the object has not been previously initialized.
      * @return A pointer to the c++ AndroidWindow.
      */
-    public int getNativePointer() {
+    public long getNativePointer() {
         if (mNativeWindowAndroid == 0) {
             mNativeWindowAndroid = nativeInit();
         }
@@ -224,34 +211,10 @@ public class WindowAndroid {
      */
     @CalledByNative
     public byte[] grabSnapshot(int windowX, int windowY, int width, int height) {
-        try {
-            // Take a screenshot of the root activity view. This generally includes UI
-            // controls such as the URL bar and OS windows such as the status bar.
-            View rootView = mActivity.findViewById(android.R.id.content).getRootView();
-            Bitmap bitmap = UiUtils.generateScaledScreenshot(rootView, 0, Bitmap.Config.ARGB_8888);
-            if (bitmap == null) return null;
-
-            // Clip the result into the requested region.
-            if (windowX > 0 || windowY > 0 || width != bitmap.getWidth() ||
-                    height != bitmap.getHeight()) {
-                Rect clip = new Rect(0, 0, bitmap.getWidth(), bitmap.getHeight());
-                clip.intersect(windowX, windowY, windowX + width, windowY + height);
-                bitmap = Bitmap.createBitmap(
-                        bitmap, clip.left, clip.top, clip.width(), clip.height());
-            }
-
-            // Compress the result into a PNG.
-            ByteArrayOutputStream result = new ByteArrayOutputStream();
-            if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, result)) return null;
-            bitmap.recycle();
-            return result.toByteArray();
-        } catch (OutOfMemoryError e) {
-            Log.e(TAG, "Out of memory while grabbing window snapshot.", e);
-            return null;
-        }
+        return null;
     }
 
-    private native int nativeInit();
-    private native void nativeDestroy(int nativeWindowAndroid);
+    private native long nativeInit();
+    private native void nativeDestroy(long nativeWindowAndroid);
 
 }

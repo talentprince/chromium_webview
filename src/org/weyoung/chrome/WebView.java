@@ -25,10 +25,12 @@ import java.util.Map;
 import org.chromium.android_webview.AwBrowserContext;
 import org.chromium.android_webview.AwContents;
 import org.chromium.android_webview.AwLayoutSizer;
+import org.chromium.android_webview.AwSettings;
 import org.chromium.content.browser.ContentViewCore;
 import org.chromium.content.browser.ContentViewRenderView;
 import org.chromium.content.browser.LoadUrlParams;
 import org.chromium.content.browser.NavigationHistory;
+import org.chromium.ui.base.WindowAndroid;
 import org.weyoung.chrome.impl.ChromeAwContentsClientProxy;
 import org.weyoung.chrome.impl.ChromeSettingsProxy;
 import org.weyoung.chrome.impl.WebBackForwardListImpl;
@@ -450,11 +452,11 @@ public class WebView extends FrameLayout {
 
         mInternalAccessAdapter = new ChromeInternalAcccessAdapter();
         mAwContentsClient = new ChromeAwContentsClientProxy(this);
-        mAwContents = new AwContents(mBrowserContext, this, mInternalAccessAdapter,
-                mAwContentsClient, false, new AwLayoutSizer(), true);
+        mAwContents = new AwContents(mBrowserContext, this, mInternalAccessAdapter, mAwContentsClient, new AwSettings(this.getContext(),
+                false, true));
         mContentViewCore = mAwContents.getContentViewCore();
 
-        mContentViewRenderView = new ContentViewRenderView(context) {
+        mContentViewRenderView = new ContentViewRenderView(context, new WindowAndroid(this.getContext())) {
             @Override
             protected void onReadyToRender() {
 

@@ -11,4 +11,6 @@ public static final int RESULT_CODE_HUNG = 2;
 public static final int RESULT_CODE_KILLED_BAD_MESSAGE = 3;
 public static final int RESULT_CODE_FAILED_TO_REGISTER_JNI = 4;
 public static final int RESULT_CODE_NATIVE_LIBRARY_LOAD_FAILED = 5;
+public static final int RESULT_CODE_NATIVE_LIBRARY_WRONG_VERSION = 6;
+public static final int RESULT_CODE_NATIVE_STARTUP_FAILED = 7;
 }

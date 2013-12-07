@@ -5,24 +5,26 @@
 package org.chromium.content.browser.input;
 
 import android.content.Context;
-import android.view.LayoutInflater;
-import android.widget.NumberPicker;
-import android.widget.NumberPicker.OnValueChangeListener;
 import android.text.format.DateUtils;
+import android.view.LayoutInflater;
 import android.view.accessibility.AccessibilityEvent;
 import android.widget.FrameLayout;
 import android.widget.NumberPicker;
-
-import java.util.Calendar;
+import android.widget.NumberPicker.OnValueChangeListener;
 
 import org.chromium.content.R;
 
-// This class is heavily based on android.widget.DatePicker.
+import java.util.Calendar;
+import java.util.TimeZone;
+
+/**
+ * This class is heavily based on android.widget.DatePicker.
+ */
 public abstract class TwoFieldDatePicker extends FrameLayout {
 
-    private NumberPicker mPositionInYearSpinner;
+    private final NumberPicker mPositionInYearSpinner;
 
-    private NumberPicker mYearSpinner;
+    private final NumberPicker mYearSpinner;
 
     private OnMonthOrWeekChangedListener mMonthOrWeekChangedListener;
 
@@ -50,7 +52,7 @@ public abstract class TwoFieldDatePicker extends FrameLayout {
         void onMonthOrWeekChanged(TwoFieldDatePicker view, int year, int positionInYear);
     }
 
-    public TwoFieldDatePicker(Context context, long minValue, long maxValue) {
+    public TwoFieldDatePicker(Context context, double minValue, double maxValue) {
         super(context, null, android.R.attr.datePickerStyle);
 
         LayoutInflater inflater = (LayoutInflater) context
@@ -74,7 +76,7 @@ public abstract class TwoFieldDatePicker extends FrameLayout {
                     }
                 } else if (picker == mYearSpinner) {
                     year = newVal;
-                 } else {
+                } else {
                     throw new IllegalArgumentException();
                 }
 
@@ -85,15 +87,15 @@ public abstract class TwoFieldDatePicker extends FrameLayout {
             }
         };
 
-        mCurrentDate = Calendar.getInstance();
+        mCurrentDate = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
         if (minValue >= maxValue) {
-            mMinDate = Calendar.getInstance();
+            mMinDate = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
             mMinDate.set(0, 0, 1);
-            mMaxDate = Calendar.getInstance();
+            mMaxDate = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
             mMaxDate.set(9999, 0, 1);
         } else {
-            mMinDate = createDateFromValue(minValue);
-            mMaxDate = createDateFromValue(maxValue);
+            mMinDate = getDateForValue(minValue);
+            mMaxDate = getDateForValue(maxValue);
         }
 
         // month
@@ -131,7 +133,7 @@ public abstract class TwoFieldDatePicker extends FrameLayout {
      * Subclasses know the semantics of @value, and need to return
      * a Calendar corresponding to it.
      */
-    protected abstract Calendar createDateFromValue(long value);
+    protected abstract Calendar getDateForValue(double value);
 
     /**
      * Updates the current date.

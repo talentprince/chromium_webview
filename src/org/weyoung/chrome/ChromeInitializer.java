@@ -6,8 +6,8 @@ package org.weyoung.chrome;
 
 import org.chromium.android_webview.AwBrowserProcess;
 import org.chromium.android_webview.AwResource;
+import org.chromium.base.CommandLine;
 import org.chromium.content.browser.ResourceExtractor;
-import org.chromium.content.common.CommandLine;
 import org.weyoung.chrome.R;
 
 import android.content.Context;

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-package org.chromium.ui;
+package org.chromium.ui.base;
 
 import android.app.Activity;
 import android.content.ContentResolver;
@@ -13,14 +13,15 @@ import android.os.Environment;
 import android.provider.MediaStore;
 import android.text.TextUtils;
 
+import org.chromium.base.CalledByNative;
+import org.chromium.base.JNINamespace;
+import org.chromium.ui.R;
+import org.chromium.ui.base.WindowAndroid;
+
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-
-import org.chromium.base.CalledByNative;
-import org.chromium.base.JNINamespace;
-import org.chromium.ui.WindowAndroid;
 
 /**
  * A dialog that is triggered from a file input field that allows a user to select a file based on
@@ -37,12 +38,12 @@ class SelectFileDialog implements WindowAndroid.IntentCallback{
     private static final String ANY_TYPES = "*/*";
     private static final String CAPTURE_IMAGE_DIRECTORY = "browser-photos";
 
-    private final int mNativeSelectFileDialog;
+    private final long mNativeSelectFileDialog;
     private List<String> mFileTypes;
     private boolean mCapture;
     private Uri mCameraOutputUri;
 
-    private SelectFileDialog(int nativeSelectFileDialog) {
+    private SelectFileDialog(long nativeSelectFileDialog) {
         mNativeSelectFileDialog = nativeSelectFileDialog;
     }
 
@@ -144,43 +145,34 @@ class SelectFileDialog implements WindowAndroid.IntentCallback{
             onFileNotSelected();
             return;
         }
-        boolean success = false;
+
         if (results == null) {
             // If we have a successful return but no data, then assume this is the camera returning
             // the photo that we requested.
             nativeOnFileSelected(mNativeSelectFileDialog, mCameraOutputUri.getPath());
-            success = true;
 
             // Broadcast to the media scanner that there's a new photo on the device so it will
             // show up right away in the gallery (rather than waiting until the next time the media
             // scanner runs).
             window.sendBroadcast(new Intent(
                     Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, mCameraOutputUri));
-        } else {
-            // We get back a content:// URI from the system if the user picked a file from the
-            // gallery. The ContentView has functionality that will convert that content:// URI to
-            // a file path on disk that Chromium understands.
-            Cursor c = contentResolver.query(results.getData(),
-                    new String[] { MediaStore.MediaColumns.DATA }, null, null, null);
-            if (c != null) {
-                if (c.getCount() == 1) {
-                    c.moveToFirst();
-                    String path = c.getString(0);
-                    if (path != null) {
-                        // Not all providers support the MediaStore.DATA column. For example,
-                        // Gallery3D (com.android.gallery3d.provider) does not support it for
-                        // Picasa Web Album images.
-                        nativeOnFileSelected(mNativeSelectFileDialog, path);
-                        success = true;
-                    }
-                }
-                c.close();
-            }
+            return;
         }
-        if (!success) {
-            onFileNotSelected();
-            window.showError(R.string.opening_file_error);
+
+        if ("file".equals(results.getData().getScheme())) {
+            nativeOnFileSelected(mNativeSelectFileDialog,
+                    results.getData().getSchemeSpecificPart());
+            return;
         }
+
+        if (results.getScheme() != null
+                && results.getScheme().equals(ContentResolver.SCHEME_CONTENT)) {
+            nativeOnFileSelected(mNativeSelectFileDialog, results.getData().toString());
+            return;
+        }
+
+        onFileNotSelected();
+        window.showError(R.string.opening_file_error);
     }
 
     private void onFileNotSelected() {
@@ -238,11 +230,11 @@ class SelectFileDialog implements WindowAndroid.IntentCallback{
     }
 
     @CalledByNative
-    private static SelectFileDialog create(int nativeSelectFileDialog) {
+    private static SelectFileDialog create(long nativeSelectFileDialog) {
         return new SelectFileDialog(nativeSelectFileDialog);
     }
 
-    private native void nativeOnFileSelected(int nativeSelectFileDialogImpl,
+    private native void nativeOnFileSelected(long nativeSelectFileDialogImpl,
             String filePath);
-    private native void nativeOnFileNotSelected(int nativeSelectFileDialogImpl);
+    private native void nativeOnFileNotSelected(long nativeSelectFileDialogImpl);
 }
